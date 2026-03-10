@@ -1,0 +1,224 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# ─────────────────────────────────────────────────────────
+#  proto-ship — deploy a prototype to a live URL in seconds
+#
+#  Usage:
+#    proto-ship myfile.html
+#    proto-ship myfile.jsx
+#    proto-ship ./my-project-folder/
+#    proto-ship myfile.html --name cool-prototype
+#
+#  Requirements: node/npm (surge installs automatically)
+#
+#  Setup (add to your shell profile once):
+#    export PATH="$HOME/.proto-ship/node_modules/.bin:$PATH"
+# ─────────────────────────────────────────────────────────
+
+VERSION="1.0.0"
+BOLD="\033[1m"
+GREEN="\033[32m"
+CYAN="\033[36m"
+YELLOW="\033[33m"
+RED="\033[31m"
+RESET="\033[0m"
+
+SHIP_DIR="${HOME}/.proto-ship"
+
+usage() {
+  echo -e "${BOLD}proto-ship${RESET} v${VERSION} — deploy a prototype to a live URL in seconds"
+  echo ""
+  echo -e "  ${CYAN}Usage:${RESET}"
+  echo "    proto-ship <file-or-folder> [--name <subdomain>]"
+  echo ""
+  echo -e "  ${CYAN}Examples:${RESET}"
+  echo "    proto-ship prototype.html                  # deploy single HTML file"
+  echo "    proto-ship app.jsx                          # deploy React component"
+  echo "    proto-ship ./my-project/                    # deploy a folder"
+  echo "    proto-ship prototype.html --name my-demo    # custom URL: my-demo.surge.sh"
+  echo ""
+  echo -e "  ${CYAN}Supported file types:${RESET}"
+  echo "    .html  — deployed as-is"
+  echo "    .jsx   — wrapped with React runtime + CDN imports"
+  echo "    folder — deployed as-is (looks for index.html)"
+  exit 0
+}
+
+# ── Parse args ───────────────────────────────────────────
+INPUT=""
+CUSTOM_NAME=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -h|--help) usage ;;
+    --name)
+      CUSTOM_NAME="$2"
+      shift 2
+      ;;
+    *)
+      INPUT="$1"
+      shift
+      ;;
+  esac
+done
+
+if [[ -z "$INPUT" ]]; then
+  echo -e "${RED}Error:${RESET} No file or folder specified."
+  echo ""
+  usage
+fi
+
+if [[ ! -e "$INPUT" ]]; then
+  echo -e "${RED}Error:${RESET} '$INPUT' not found."
+  exit 1
+fi
+
+# ── Ensure surge is installed ────────────────────────────
+# Install locally to ~/.ship so we don't need sudo
+export PATH="${SHIP_DIR}/node_modules/.bin:$PATH"
+
+if ! command -v surge &>/dev/null; then
+  echo -e "${YELLOW}⚡ First run — installing surge (one-time, ~5s)...${RESET}"
+  mkdir -p "$SHIP_DIR"
+  (cd "$SHIP_DIR" && npm install surge --silent 2>&1)
+  if ! command -v surge &>/dev/null; then
+    echo -e "${RED}Error:${RESET} Failed to install surge."
+    echo "  Try: npm install -g surge"
+    exit 1
+  fi
+  echo -e "${GREEN}✓${RESET} surge installed to ~/.proto-ship"
+  echo ""
+  echo -e "  ${CYAN}Tip:${RESET} Add this to your ~/.zshrc or ~/.bashrc for faster startup:"
+  echo -e "    export PATH=\"\$HOME/.proto-ship/node_modules/.bin:\$PATH\""
+  echo ""
+fi
+
+# ── Prepare deploy directory ─────────────────────────────
+DEPLOY_DIR=$(mktemp -d)
+trap "rm -rf $DEPLOY_DIR" EXIT
+
+EXT="${INPUT##*.}"
+BASENAME=$(basename "$INPUT" ".$EXT")
+
+if [[ -d "$INPUT" ]]; then
+  # ── Folder: copy as-is ─────────────────────────────────
+  cp -r "$INPUT"/. "$DEPLOY_DIR/"
+  echo -e "${CYAN}↑${RESET} Deploying folder: ${BOLD}$INPUT${RESET}"
+
+elif [[ "$EXT" == "html" || "$EXT" == "htm" ]]; then
+  # ── HTML file: copy as index.html ──────────────────────
+  cp "$INPUT" "$DEPLOY_DIR/index.html"
+  echo -e "${CYAN}↑${RESET} Deploying HTML: ${BOLD}$INPUT${RESET}"
+
+elif [[ "$EXT" == "jsx" ]]; then
+  # ── JSX file: wrap with React runtime ──────────────────
+  echo -e "${CYAN}↑${RESET} Deploying React component: ${BOLD}$INPUT${RESET}"
+
+  JSX_SOURCE=$(<"$INPUT")
+
+  # Detect component name from common export patterns
+  COMPONENT_NAME=""
+  # Try: export default function Name
+  COMPONENT_NAME=$(grep -oP '(?<=export default function )\w+' "$INPUT" 2>/dev/null || true)
+  # Try: export default class Name
+  [[ -z "$COMPONENT_NAME" ]] && COMPONENT_NAME=$(grep -oP '(?<=export default class )\w+' "$INPUT" 2>/dev/null || true)
+  # Try: first function declaration
+  [[ -z "$COMPONENT_NAME" ]] && COMPONENT_NAME=$(grep -oP '(?<=^function )\w+' "$INPUT" 2>/dev/null | head -1 || true)
+  # Try: const Name = () =>
+  [[ -z "$COMPONENT_NAME" ]] && COMPONENT_NAME=$(grep -oP '(?<=^const )\w+(?=\s*=\s*\(\))' "$INPUT" 2>/dev/null | head -1 || true)
+  # Fallback
+  [[ -z "$COMPONENT_NAME" ]] && COMPONENT_NAME="App"
+
+  cat > "$DEPLOY_DIR/index.html" << 'HTMLEOF'
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Prototype</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.9/babel.min.js"></script>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/lucide/0.383.0/umd/lucide.min.js"></script>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="text/babel">
+HTMLEOF
+
+  # Transform JSX imports into browser-compatible globals
+  echo "$JSX_SOURCE" \
+    | sed -E '/^import\s+.*from\s+['\''"]react['\''"].*;?\s*$/d' \
+    | sed -E '/^import\s+.*from\s+['\''"]react-dom['\''"].*;?\s*$/d' \
+    | sed -E '/^import\s+.*from\s+['\''"]react-dom\/client['\''"].*;?\s*$/d' \
+    | sed -E "s/^import \{([^}]+)\} from ['\"]react['\"];?/const {\1} = React;/" \
+    | sed -E '/^import\s+.*from\s+['\''"]lucide-react['\''"].*;?\s*$/d' \
+    | sed -E 's/^export default //' \
+    >> "$DEPLOY_DIR/index.html"
+
+  cat >> "$DEPLOY_DIR/index.html" << HTMLEOF
+
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(React.createElement(${COMPONENT_NAME}));
+  </script>
+</body>
+</html>
+HTMLEOF
+
+else
+  echo -e "${RED}Error:${RESET} Unsupported file type '.$EXT'"
+  echo "  Supported: .html, .htm, .jsx, or a folder"
+  exit 1
+fi
+
+# ── Check for index.html ────────────────────────────────
+if [[ ! -f "$DEPLOY_DIR/index.html" ]]; then
+  HTML_FILE=$(find "$DEPLOY_DIR" -maxdepth 1 -name "*.html" -print -quit)
+  if [[ -n "$HTML_FILE" ]]; then
+    cp "$HTML_FILE" "$DEPLOY_DIR/index.html"
+  else
+    echo -e "${RED}Error:${RESET} No index.html found in the folder."
+    echo "  Make sure your project has an index.html or at least one .html file."
+    exit 1
+  fi
+fi
+
+# ── Generate domain ──────────────────────────────────────
+if [[ -n "$CUSTOM_NAME" ]]; then
+  DOMAIN="${CUSTOM_NAME}.surge.sh"
+else
+  RANDOM_SUFFIX=$(printf '%06x' $((RANDOM * RANDOM)))
+  DOMAIN="${BASENAME}-${RANDOM_SUFFIX}.surge.sh"
+fi
+
+# ── Deploy ───────────────────────────────────────────────
+echo -e "${YELLOW}Deploying...${RESET}"
+echo ""
+
+if surge "$DEPLOY_DIR" "$DOMAIN" 2>&1; then
+  echo ""
+  echo -e "${GREEN}${BOLD}✓ Live!${RESET}"
+  echo ""
+  echo -e "  ${BOLD}https://${DOMAIN}${RESET}"
+  echo ""
+
+  # Copy URL to clipboard if possible
+  if command -v pbcopy &>/dev/null; then
+    echo -n "https://${DOMAIN}" | pbcopy
+    echo -e "  ${GREEN}✓${RESET} URL copied to clipboard"
+  elif command -v xclip &>/dev/null; then
+    echo -n "https://${DOMAIN}" | xclip -selection clipboard
+    echo -e "  ${GREEN}✓${RESET} URL copied to clipboard"
+  fi
+else
+  echo ""
+  echo -e "${RED}Deploy failed.${RESET}"
+  echo "  If this is your first time, surge will ask you to create an account."
+  echo "  Just enter your email and a password — it's free."
+  exit 1
+fi
